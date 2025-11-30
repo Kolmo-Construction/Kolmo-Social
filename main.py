@@ -209,7 +209,7 @@ def process_file(service, r2_client, file_info, source_type, prompts):
 
         # 2. Upload to R2 (Only if Instagram needs it)
         # Instagram is triggered by 'meta' or 'all'
-        if source_type in ["meta", "all"] and r2_client:
+        if r2_client:
             public_url = upload_to_r2(r2_client, image_data, file_name, mime_type)
             if public_url:
                 payload["image_url"] = public_url
