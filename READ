@@ -1,1 +1,242 @@
 This is a New repo for Jules 
+Kolmo Social Engine: Architecture & Documentation
+
+Version: 1.0
+
+Last Updated: November 2025
+
+Owner: Kolmo Construction
+
+1. Executive Summary
+
+The Kolmo Social Engine is a serverless, event-driven automation pipeline designed to distribute social media content across LinkedIn, Facebook, Instagram, and Google Business Profile (GBP).
+
+It solves key API limitations (specifically Google's API restrictions and Instagram's strict public URL requirements) by utilizing a hybrid approach:
+
+Python Worker: Handles logic, AI captioning, and file hosting.
+
+Make.com: Orchestrates the routing and final API calls.
+
+Buffer: Acts as a "bridge" middleware to bypass Google's restricted API.
+
+Cloudflare R2: Provides public image hosting required by Instagram and Buffer.
+
+2. Architecture Diagram (Logical Flow)
+
+Flow Description:
+
+User uploads an image to a specific Google Drive Folder (e.g., ID_ALL).
+
+Python Script (Railway) detects the file, downloads it, and generates captions using Gemini AI.
+
+Python Script uploads the image to Cloudflare R2 to generate a public URL.
+
+Python Script sends the data (Captions + R2 URL + Binary File) to Make.com.
+
+Make.com routes the data:
+
+LinkedIn & Facebook: Receive the binary file directly.
+
+Instagram: Receives the R2 URL (required by API).
+
+Google Business Profile: Receives the R2 URL via Buffer (required to bypass API restrictions).
+
+3. System Components
+
+A. Input Layer: Google Drive
+
+The system watches specific folders to determine the "intent" of the post.
+
+Folder ID Variable
+
+Logic / Target
+
+ID_LINKEDIN
+
+Triggers only LinkedIn.
+
+ID_META
+
+Triggers Facebook & Instagram.
+
+ID_GBP
+
+Triggers Google Business Profile (via Buffer).
+
+ID_ALL
+
+Triggers ALL platforms simultaneously.
+
+ID_CONFIG
+
+Stores prompt rules (e.g., prompt_meta.txt).
+
+B. Logic Layer: Python Script (Railway)
+
+Runs continuously on Railway. It performs the "heavy lifting" that Make.com cannot do cheaply or easily.
+
+Gemini AI: Generates specific captions based on which folder the image was dropped in. (e.g., "Professional" for LinkedIn, "SEO/Trust" for Google).
+
+Cloudflare R2 Uploader: Uploads the raw image to a public bucket to generate a clean https://pub-xxx.r2.dev/image.jpg link. Critical for Instagram and Buffer.
+
+C. Routing Layer: Make.com
+
+Receives the data and routes it.
+
+Trigger: Custom Webhook.
+
+Router: Uses Filters to check the target variable (e.g., target contains meta).
+
+D. The "Buffer Bridge" (Critical Workaround)
+
+Problem: Google stopped issuing new API access for the "Google My Business" API (Legacy) and the new API is invite-only/complex. Make.com modules often fail with 403 Permission Denied.
+
+Solution: We use Buffer (Free Plan) as a middleware.
+
+Make.com sends the caption + R2 Image URL to Buffer.
+
+Buffer (which has Enterprise Google access) posts to Google Business Profile.
+
+4. Step-by-Step Data Flow
+
+Step 1: Ingestion
+
+User drops Project_Kitchen.jpg into the ID_ALL folder.
+
+Python script detects the file within 60 seconds.
+
+Step 2: Processing (Python)
+
+Prompt Loading: Script reads prompt_meta.txt, prompt_gbp.txt, etc., from ID_CONFIG.
+
+AI Generation: Gemini generates three distinct captions:
+
+caption_linkedin
+
+caption_meta
+
+caption_gbp
+
+Hosting: Script uploads the image to Cloudflare R2 bucket (kolmo-social-images) and generates a Public URL.
+
+Step 3: Handoff
+
+Script sends a JSON payload to Make.com:
+
+{
+  "target": "all",
+  "caption_linkedin": "Professional update...",
+  "caption_meta": "Check out this kitchen! 🏠...",
+  "caption_gbp": "Kolmo Construction completed... Call (206)...",
+  "image_url": "[https://pub-xyz.r2.dev/Project_Kitchen.jpg](https://pub-xyz.r2.dev/Project_Kitchen.jpg)",
+  "file": "(Binary Data)"
+}
+
+
+Step 4: Execution (Make.com)
+
+The Router evaluates the target ("all") and opens all 4 paths:
+
+Facebook Path: Uses the binary file data to create a "Photo Post".
+
+LinkedIn Path: Uses the binary file data to create a "Image Share".
+
+Instagram Path:
+
+Uses image_url (R2 Link). Instagram API rejects binary uploads.
+
+Uses caption_meta.
+
+Google (Buffer) Path:
+
+Connects to Buffer module.
+
+Uses image_url (R2 Link). Buffer requires a public link.
+
+Uses caption_gbp.
+
+Buffer then pushes the update to Google.
+
+5. Configuration Reference
+
+Environment Variables (Railway)
+
+Variable
+
+Value / Notes
+
+R2_ACCOUNT_ID
+
+From Cloudflare Dashboard URL.
+
+R2_ACCESS_KEY_ID
+
+Created via "Manage R2 API Tokens" (Read/Write).
+
+R2_SECRET_ACCESS_KEY
+
+Secret (Only shown once upon creation).
+
+R2_BUCKET_NAME
+
+kolmo-social-images
+
+R2_PUBLIC_DOMAIN
+
+The https://pub-....r2.dev URL enabled in bucket settings.
+
+GOOGLE_CREDS_JSON
+
+Raw Service Account JSON.
+
+GEMINI_API_KEY
+
+AI Studio Key.
+
+Make.com Module Configuration
+
+Instagram Module:
+
+Photo URL: Map 1.image_url.
+
+Caption: Map 1.caption_meta.
+
+Buffer Module:
+
+Profile: Select "Kolmo Construction".
+
+Text: Map 1.caption_gbp.
+
+Attach Media: Yes.
+
+Photo: Map 1.image_url.
+
+6. Maintenance & Troubleshooting
+
+Issue: "Media ID not available" (Instagram)
+
+Cause: The R2 URL is invalid or the filename contains spaces.
+
+Fix: Ensure files are named no_spaces.jpg. The script now auto-encodes filenames, but clean naming is safer.
+
+Issue: Buffer Post Failed
+
+Cause: Google rejected the image size.
+
+Fix: Google requires images larger than 250x250px. Do not upload tiny icons or logos. Use real project photos.
+
+Issue: Updates not applying
+
+Cause: Railway deployment lag.
+
+Fix: Check Railway dashboard. If a deployment is "Building," wait 2 minutes before uploading a new file.
+
+How to Update Prompts
+
+Go to ID_CONFIG folder in Drive.
+
+Edit prompt_gbp.txt (must be a .txt file, not Google Doc).
+
+Save and re-upload.
+
+Wait 60 seconds for the next poll cycle.
