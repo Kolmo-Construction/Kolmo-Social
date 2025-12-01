@@ -24,7 +24,9 @@ load_dotenv()
 
 def get_env_var(name):
     val = os.environ.get(name)
-    if not val:
+    # We only log an error if it's a critical var. 
+    # Optional folder vars (like Twitter/Bluesky) might be missing during setup.
+    if not val and name not in ["ID_TWITTER", "ID_BLUESKY"]:
         logger.error(f"Missing environment variable: {name}")
     return val
 
@@ -37,6 +39,8 @@ ID_LINKEDIN = get_env_var("ID_LINKEDIN")
 ID_META = get_env_var("ID_META")
 ID_GBP = get_env_var("ID_GBP")
 ID_ALL = get_env_var("ID_ALL")
+ID_TWITTER = get_env_var("ID_TWITTER") # New
+ID_BLUESKY = get_env_var("ID_BLUESKY") # New
 ID_CONFIG = get_env_var("ID_CONFIG")
 ID_PROCESSED = get_env_var("ID_PROCESSED")
 ID_ERRORS = get_env_var("ID_ERRORS")
@@ -51,6 +55,8 @@ R2_BUCKET_NAME = get_env_var("R2_BUCKET_NAME")
 DEFAULT_PROMPT_LINKEDIN = "Write a professional, craftsmanship-focused LinkedIn caption for this image."
 DEFAULT_PROMPT_META = "Write a casual, engaging Facebook/Instagram caption for this image."
 DEFAULT_PROMPT_GBP = "Write an SEO-heavy Google Business Profile caption for this image with a 'Call us' CTA and no hashtags."
+DEFAULT_PROMPT_TWITTER = "Write a punchy tweet under 280 chars for a construction firm. No hashtags."
+DEFAULT_PROMPT_BLUESKY = "Write a casual micro-blog post under 300 chars for a construction firm. No hashtags."
 
 def get_drive_service():
     """Authenticates and returns the Google Drive API service."""
@@ -122,7 +128,9 @@ def get_prompts(service):
     prompts = {
         "linkedin": DEFAULT_PROMPT_LINKEDIN,
         "meta": DEFAULT_PROMPT_META,
-        "gbp": DEFAULT_PROMPT_GBP
+        "gbp": DEFAULT_PROMPT_GBP,
+        "twitter": DEFAULT_PROMPT_TWITTER,
+        "bluesky": DEFAULT_PROMPT_BLUESKY
     }
     if not service or not ID_CONFIG:
         return prompts
@@ -141,6 +149,12 @@ def get_prompts(service):
             elif name == 'prompt_gbp.txt':
                 content = get_text_content(service, file.get('id'))
                 if content: prompts["gbp"] = content
+            elif name == 'prompt_twitter.txt':
+                content = get_text_content(service, file.get('id'))
+                if content: prompts["twitter"] = content
+            elif name == 'prompt_bluesky.txt':
+                content = get_text_content(service, file.get('id'))
+                if content: prompts["bluesky"] = content
     except Exception as e:
         logger.error(f"Error fetching prompts: {e}")
     return prompts
@@ -156,7 +170,7 @@ def generate_caption(image_data, mime_type, prompt):
         return response.text.strip()
     except Exception as e:
         logger.error(f"Gemini generation failed: {e}")
-        raise e
+        return ""
 
 def move_file(service, file_id, destination_folder_id):
     try:
@@ -195,27 +209,39 @@ def process_file(service, r2_client, file_info, source_type, prompts):
         if source_type == "linkedin":
             payload["caption_linkedin"] = generate_caption(image_data, mime_type, prompts["linkedin"])
             payload["target"] = "linkedin"
+            
         elif source_type == "meta":
             payload["caption_meta"] = generate_caption(image_data, mime_type, prompts["meta"])
             payload["target"] = "meta"
+            
         elif source_type == "gbp":
             payload["caption_gbp"] = generate_caption(image_data, mime_type, prompts["gbp"])
             payload["target"] = "gbp"
+            
+        elif source_type == "twitter":
+            payload["caption_twitter"] = generate_caption(image_data, mime_type, prompts["twitter"])
+            payload["target"] = "twitter"
+            
+        elif source_type == "bluesky":
+            payload["caption_bluesky"] = generate_caption(image_data, mime_type, prompts["bluesky"])
+            payload["target"] = "bluesky"
+            
         elif source_type == "all":
+            # Generate ALL captions
             payload["caption_linkedin"] = generate_caption(image_data, mime_type, prompts["linkedin"])
             payload["caption_meta"] = generate_caption(image_data, mime_type, prompts["meta"])
             payload["caption_gbp"] = generate_caption(image_data, mime_type, prompts["gbp"])
+            payload["caption_twitter"] = generate_caption(image_data, mime_type, prompts["twitter"])
+            payload["caption_bluesky"] = generate_caption(image_data, mime_type, prompts["bluesky"])
             payload["target"] = "all"
 
-        # 2. Upload to R2 (Only if Instagram needs it)
-        # Instagram is triggered by 'meta' or 'all'
+        # 2. Upload to R2 (We upload for everyone now to ensure URLs are available)
         if r2_client:
             public_url = upload_to_r2(r2_client, image_data, file_name, mime_type)
             if public_url:
                 payload["image_url"] = public_url
         
         # 3. Send Webhook
-        # We send BOTH the binary file (for FB/LinkedIn) and the URL (for Instagram)
         files = {
             'file': (file_name, image_data, mime_type)
         }
@@ -246,12 +272,14 @@ def main():
 
     r2_client = get_r2_client()
     if not r2_client:
-        logger.warning("Could not initialize R2 Client. Instagram uploads may fail.")
+        logger.warning("Could not initialize R2 Client.")
 
     folder_map = {
         ID_LINKEDIN: "linkedin",
         ID_META: "meta",
         ID_GBP: "gbp",
+        ID_TWITTER: "twitter",
+        ID_BLUESKY: "bluesky",
         ID_ALL: "all"
     }
 
@@ -261,7 +289,9 @@ def main():
             current_prompts = get_prompts(service)
             
             for folder_id, source_type in folder_map.items():
-                if not folder_id: continue
+                # Skip folders that aren't configured in ENV
+                if not folder_id: 
+                    continue
                 
                 query = f"'{folder_id}' in parents and trashed = false and mimeType contains 'image/'"
                 results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
